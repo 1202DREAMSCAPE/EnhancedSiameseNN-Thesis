@@ -15,45 +15,14 @@ from imblearn.over_sampling import SMOTE
 from SignatureDataGenerator import SignatureDataGenerator
 from SigNet_v1 import create_siamese_network
 from tensorflow.keras.models import load_model
-from RealESRGAN.realesrgan.utils import RealESRGANer
+
+tf.keras.mixed_precision.set_global_policy('float32')
 
 # Ensure reproducibility
 import random
 np.random.seed(1337)
 random.seed(1337)
 
-
-# Initialize Real-ESRGAN Model
-model_path = "RealESRGAN/weights/RealESRGAN_x4plus.pth"
-try:
-    esrgan = RealESRGANer(
-        scale=4,
-        model_path=model_path,
-        tile=0,
-        tile_pad=10,
-        pre_pad=0,
-        half=True,
-        device="cuda" if torch.cuda.is_available() else "cpu"
-    )
-    print("✅ Real-ESRGAN model loaded successfully!")
-except Exception as e:
-    print("❌ Error loading Real-ESRGAN model:", e)
-    esrgan = None
-
-# Enable GPU & Prevent Out-of-Memory (OOM) Errors
-gpus = tf.config.experimental.list_physical_devices('GPU')
-if gpus:
-    try:
-        for gpu in gpus:
-            tf.config.experimental.set_memory_growth(gpu, True)
-        print("✅ GPU memory growth enabled.")
-    except RuntimeError as e:
-        print(e)
-
-# Mixed Precision for Faster Training
-tf.keras.mixed_precision.set_global_policy('mixed_float16')
-
-# Triplet Loss Function
 def triplet_loss(y_true, y_pred, alpha=0.2):
     anchor, positive, negative = y_pred[:, 0], y_pred[:, 1], y_pred[:, 2]
     pos_dist = K.sum(K.square(anchor - positive), axis=-1)
@@ -61,7 +30,6 @@ def triplet_loss(y_true, y_pred, alpha=0.2):
     loss = K.maximum(pos_dist - neg_dist + alpha, 0.0)
     return K.mean(loss)
 
-# FAISS for efficient similarity search
 def build_faiss_index(embeddings):
     d = embeddings.shape[1]
     index = faiss.IndexFlatL2(d)
@@ -73,23 +41,22 @@ def search_faiss(index, query_vectors, k=5):
     distances, indices = index.search(query_vectors, k)
     return distances, indices
 
-# Apply FAISS for Efficient Embedding Search
-def get_hard_negatives(embeddings, labels, k=5):
-    index = build_faiss_index(embeddings)
-    distances, indices = search_faiss(index, embeddings, k)
-    hard_negatives = [(i, j) for i in range(len(labels)) for j in indices[i] if labels[i] != labels[j]]
-    return hard_negatives
+def log_metrics(start_time, description=""):
+    end_time = time.perf_counter()
+    memory_usage = (torch.cuda.memory_allocated() / (1024 * 1024)
+                    if torch.cuda.is_available() else 0)  # GPU memory
+    print(f"🔹 {description} - Time: {end_time - start_time:.4f}s | GPU Memory: {memory_usage:.2f} MB")
 
 # Dataset Configuration
 datasets = {
-    "CEDAR": { 
+    "CEDAR": {
         "path": "/Users/christelle/Downloads/Thesis/Dataset/CEDAR",
-        "train_writers": list(range(261, 300)), 
+        "train_writers": list(range(261, 300)),
         "test_writers": list(range(300, 315))
     },
-    "BHSig260_Bengali": { 
+    "BHSig260_Bengali": {
         "path": "/Users/christelle/Downloads/Thesis/Dataset/BHSig260_Bengali",
-        "train_writers": list(range(1, 71)), 
+        "train_writers": list(range(1, 71)),
         "test_writers": list(range(71, 100))
     },
     "BHSig260_Hindi": {
@@ -114,39 +81,40 @@ def apply_smote(X1, X2, y, sampling_strategy=1.0):
     print(f"SMOTE applied: {len(y_resampled) - len(y)} new samples added.")
     return X1_resampled, X2_resampled, y_resampled
 
-# Load Dataset with Real-ESRGAN and SMOTE
-def load_data_with_esrgan_and_smote(dataset_name, dataset_config):
-    generator = SignatureDataGenerator(
-        dataset={dataset_name: dataset_config},
-        img_height=155, img_width=220,
-        apply_esrgan=True
-    )
-    generator.esrgan_model = esrgan  # Set Real-ESRGAN model
-
-    (train_X1, train_X2), train_labels = generator.get_train_data()
-    (test_X1, test_X2), test_labels = generator.get_test_data()
-
-    # Apply SMOTE after Real-ESRGAN
-    train_X1, train_X2, train_labels = apply_smote(train_X1, train_X2, train_labels)
-
-    return (train_X1, train_X2, train_labels), (test_X1, test_X2, test_labels)
-
-# Train & Save Separate Models
+# Training Process for Each Dataset
 for dataset_name, dataset_config in datasets.items():
     print(f"\n--- Training Model on {dataset_name} ---")
 
-    (train_X1, train_X2, train_labels), (test_X1, test_X2, test_labels) = load_data_with_esrgan_and_smote(dataset_name, dataset_config)
+    # ✅ Create a new generator for each dataset
+    generator = SignatureDataGenerator(
+        dataset={dataset_name: dataset_config},
+        img_height=155,
+        img_width=220,
+        batch_sz=8
+    )
 
-    model = create_siamese_network(input_shape=(155, 220, 1))
+    (train_X1, train_X2), train_labels = generator.get_train_data()
+    (test_X1, test_X2), test_labels = generator.get_test_data()
+    train_labels = train_labels.astype(np.float32)  # You could also use np.int32
+    test_labels = test_labels.astype(np.float32)  # You could also use np.int32
+
+    if train_X1 is None or test_X1 is None:
+        print(f"⚠ No data generated for {dataset_name}, skipping...")
+        continue
+
+    model = create_siamese_network(input_shape=(155, 220, 3))
     model.compile(optimizer=RMSprop(learning_rate=0.001), loss=triplet_loss)
 
-    model.fit((train_X1, train_X2), train_labels, epochs=5, batch_size=8, verbose=1)
-    model.save(f"{dataset_name}_siamese_model.h5")
-    print(f"Model saved as {dataset_name}_siamese_model.h5")
+    print(f"Train X1 shape: {train_X1.shape}, dtype: {train_X1.dtype}")
+    print(f"Train X2 shape: {train_X2.shape}, dtype: {train_X2.dtype}")
+    print(f"Train labels shape: {train_labels.shape}, dtype: {train_labels.dtype}")
 
-# Train Unified Model on All Datasets
-unified_model = create_siamese_network(input_shape=(155, 220, 1))
-unified_model.compile(optimizer=RMSprop(learning_rate=0.001), loss=triplet_loss)
-unified_model.fit((train_X1, train_X2), train_labels, epochs=5, batch_size=8, verbose=1)
-unified_model.save("unified_siamese_model.h5")
-print("Unified model saved as unified_siamese_model.h5")
+    start_time = time.perf_counter()
+    model.fit(
+        (train_X1, train_X2), train_labels,
+        epochs=5, batch_size=8, verbose=1
+    )
+    log_metrics(start_time, f"Training {dataset_name} Completed")
+
+    model.save(f"{dataset_name}_siamese_model.h5")
+    print(f"✅ Model saved as {dataset_name}_siamese_model.h5")
