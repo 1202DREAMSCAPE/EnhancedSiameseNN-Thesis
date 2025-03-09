@@ -8,15 +8,13 @@ import numpy as np
 import time
 import faiss
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
-from tensorflow.keras.optimizers.legacy import RMSprop
+from tensorflow.keras.optimizers import RMSprop
 from tensorflow.keras import backend as K
 import tensorflow as tf
 from imblearn.over_sampling import SMOTE
 from SignatureDataGenerator import SignatureDataGenerator
 from SigNet_v1 import create_siamese_network
 from tensorflow.keras.models import load_model
-
-tf.keras.mixed_precision.set_global_policy('float32')
 
 # Ensure reproducibility
 import random
@@ -90,7 +88,7 @@ for dataset_name, dataset_config in datasets.items():
         dataset={dataset_name: dataset_config},
         img_height=155,
         img_width=220,
-        batch_sz=8
+        batch_sz=4
     )
 
     (train_X1, train_X2), train_labels = generator.get_train_data()
@@ -111,9 +109,12 @@ for dataset_name, dataset_config in datasets.items():
 
     start_time = time.perf_counter()
     model.fit(
-        (train_X1, train_X2), train_labels,
-        epochs=5, batch_size=8, verbose=1
-    )
+        [train_X1, train_X2], train_labels, 
+        epochs=5, 
+        batch_size=4, 
+        verbose=1
+        )
+
     log_metrics(start_time, f"Training {dataset_name} Completed")
 
     model.save(f"{dataset_name}_siamese_model.h5")

@@ -12,7 +12,7 @@ class SignatureDataGenerator:
     A data generator for multiple signature datasets containing genuine and forged signatures.
     """
 
-    def __init__(self, dataset, img_height=155, img_width=220, batch_sz=8):
+    def __init__(self, dataset, img_height=155, img_width=220, batch_sz=4):
         """
         Initialize the generator with dataset parameters.
 
