@@ -1,1 +1,4 @@
 ThesisEnv/
+ThesisEnv/lib/python3.10/site-packages/torch/lib/libtorch_cpu.dylib
+ThesisEnv/lib/python3.10/site-packages/tensorflow/libtensorflow_cc.2.dylib
+ThesisEnv/lib/python3.10/site-packages/clang/native/libclang.dylib
