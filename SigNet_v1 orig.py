@@ -14,17 +14,17 @@ def euclidean_distance(vectors):
     x, y = vectors
     return K.sqrt(K.maximum(K.sum(K.square(x - y), axis=1, keepdims=True), K.epsilon()))
 
-# ✅ Define Triplet Loss
+# ✅ Define Contrastive Loss
 @register_keras_serializable()
-def triplet_loss(y_true, y_pred, alpha=0.2):
+def contrastive_loss(y_true, y_pred):
     """
-    Computes the Triplet Loss.
+    Computes the Contrastive Loss as defined in Hadsell-et-al. (2006).
     """
-    anchor, positive, negative = y_pred[:, 0], y_pred[:, 1], y_pred[:, 2]
-    pos_dist = tf.reduce_sum(tf.square(anchor - positive), axis=-1)
-    neg_dist = tf.reduce_sum(tf.square(anchor - negative), axis=-1)
-    loss = tf.reduce_mean(tf.maximum(pos_dist - neg_dist + alpha, 0.0))
-    return loss
+    margin = 1.0
+    y_true = K.cast(y_true, y_pred.dtype)
+    positive_loss = (1 - y_true) * K.square(y_pred)
+    negative_loss = y_true * K.square(K.maximum(margin - y_pred, 0))
+    return K.mean(positive_loss + negative_loss)
 
 # ✅ Define the SigNet Base Network Architecture
 def create_base_network_signet(input_shape):
@@ -64,23 +64,22 @@ def create_base_network_signet(input_shape):
 
     return seq
 
-# ✅ Define the Triplet Network
-def create_triplet_network(input_shape):
+# ✅ Define the Siamese Network with Contrastive Loss
+def create_siamese_network(input_shape):
     """
-    Builds the Triplet Neural Network for signature verification.
+    Builds the Siamese Neural Network for signature verification.
     """
+    input_a = Input(shape=input_shape, name="input_a")
+    input_b = Input(shape=input_shape, name="input_b")
+
+    # Use the same CNN encoder for both inputs
     base_network = create_base_network_signet(input_shape)
 
-    input_anchor = Input(shape=input_shape, name='input_anchor')
-    input_positive = Input(shape=input_shape, name='input_positive')
-    input_negative = Input(shape=input_shape, name='input_negative')
+    encoded_a = base_network(input_a)
+    encoded_b = base_network(input_b)
 
-    encoded_anchor = base_network(input_anchor)
-    encoded_positive = base_network(input_positive)
-    encoded_negative = base_network(input_negative)
+    # Compute Euclidean distance
+    distance = Lambda(euclidean_distance)([encoded_a, encoded_b])
 
-    # Concatenate the encoded vectors for triplet loss computation
-    triplet_output = Lambda(lambda x: K.concatenate([x[0], x[1], x[2]], axis=-1))([encoded_anchor, encoded_positive, encoded_negative])
-
-    model = Model(inputs=[input_anchor, input_positive, input_negative], outputs=triplet_output)
+    model = Model(inputs=[input_a, input_b], outputs=distance)
     return model

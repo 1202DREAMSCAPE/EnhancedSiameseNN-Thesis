@@ -21,6 +21,17 @@ import random
 np.random.seed(1337)
 random.seed(1337)
 
+tf.config.set_soft_device_placement(True)
+
+gpus = tf.config.experimental.list_physical_devices('GPU')
+if gpus:
+    try:
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+        print("✅ GPU memory growth enabled.")
+    except RuntimeError as e:
+        print(e)
+
 def triplet_loss(y_true, y_pred, alpha=0.2):
     anchor, positive, negative = y_pred[:, 0], y_pred[:, 1], y_pred[:, 2]
     pos_dist = K.sum(K.square(anchor - positive), axis=-1)
@@ -45,6 +56,22 @@ def log_metrics(start_time, description=""):
                     if torch.cuda.is_available() else 0)  # GPU memory
     print(f"🔹 {description} - Time: {end_time - start_time:.4f}s | GPU Memory: {memory_usage:.2f} MB")
 
+# Apply SMOTE for Class Balancing
+def apply_smote(X1, X2, y, sampling_strategy=1):
+    flat_shape = (X1.shape[0], -1)
+    X1_flat = X1.reshape(flat_shape)
+    X2_flat = X2.reshape(flat_shape)
+
+    smote = SMOTE(sampling_strategy=sampling_strategy, random_state=42)
+    combined = np.hstack([X1_flat, X2_flat])
+    combined_resampled, y_resampled = smote.fit_resample(combined, y)
+
+    X1_resampled = combined_resampled[:, :X1_flat.shape[1]].reshape(-1, *X1.shape[1:])
+    X2_resampled = combined_resampled[:, X1_flat.shape[1]:].reshape(-1, *X2.shape[1:])
+
+    print(f"SMOTE applied: {len(y_resampled) - len(y)} new samples added.")
+    return X1_resampled, X2_resampled, y_resampled
+
 # Dataset Configuration
 datasets = {
     "CEDAR": {
@@ -64,26 +91,11 @@ datasets = {
     },
 }
 
-# Apply SMOTE for Class Balancing
-def apply_smote(X1, X2, y, sampling_strategy=1.0):
-    flat_shape = (X1.shape[0], -1)
-    X1_flat = X1.reshape(flat_shape)
-    X2_flat = X2.reshape(flat_shape)
-
-    smote = SMOTE(sampling_strategy=sampling_strategy, random_state=42)
-    combined_resampled, y_resampled = smote.fit_resample(np.hstack([X1_flat, X2_flat]), y)
-
-    X1_resampled = combined_resampled[:, :X1_flat.shape[1]].reshape(-1, *X1.shape[1:])
-    X2_resampled = combined_resampled[:, X1_flat.shape[1]:].reshape(-1, *X2.shape[1:])
-
-    print(f"SMOTE applied: {len(y_resampled) - len(y)} new samples added.")
-    return X1_resampled, X2_resampled, y_resampled
-
 # Training Process for Each Dataset
 for dataset_name, dataset_config in datasets.items():
     print(f"\n--- Training Model on {dataset_name} ---")
 
-    # ✅ Create a new generator for each dataset
+    # Create a new generator for each dataset
     generator = SignatureDataGenerator(
         dataset={dataset_name: dataset_config},
         img_height=155,
@@ -91,21 +103,37 @@ for dataset_name, dataset_config in datasets.items():
         batch_sz=4
     )
 
-    (train_X1, train_X2), train_labels = generator.get_train_data()
-    (test_X1, test_X2), test_labels = generator.get_test_data()
-    train_labels = train_labels.astype(np.float32)  # You could also use np.int32
-    test_labels = test_labels.astype(np.float32)  # You could also use np.int32
+    # Get training data in batches
+    train_data_generator = generator.get_train_data()
 
-    if train_X1 is None or test_X1 is None:
-        print(f"⚠ No data generated for {dataset_name}, skipping...")
-        continue
+    # Initialize lists to store training data
+    train_X1, train_X2, train_labels = [], [], []
 
-    model = create_siamese_network(input_shape=(155, 220, 3))
-    model.compile(optimizer=RMSprop(learning_rate=0.001), loss=triplet_loss)
+    # Iterate over batches and collect data
+    for batch_X1, batch_X2, batch_labels in train_data_generator:
+        train_X1.append(batch_X1)
+        train_X2.append(batch_X2)
+        train_labels.append(batch_labels)
+
+    # Concatenate all batches into single arrays
+    train_X1 = np.concatenate(train_X1, axis=0)
+    train_X2 = np.concatenate(train_X2, axis=0)
+    train_labels = np.concatenate(train_labels, axis=0)
 
     print(f"Train X1 shape: {train_X1.shape}, dtype: {train_X1.dtype}")
     print(f"Train X2 shape: {train_X2.shape}, dtype: {train_X2.dtype}")
     print(f"Train labels shape: {train_labels.shape}, dtype: {train_labels.dtype}")
+    train_labels = tf.cast(train_labels, tf.float32)
+
+    # Apply SMOTE for class balancing
+    train_X1, train_X2, train_labels = apply_smote(train_X1, train_X2, train_labels)
+
+    print(f"Train X1 shape after SMOTE: {train_X1.shape}, dtype: {train_X1.dtype}")
+    print(f"Train X2 shape after SMOTE: {train_X2.shape}, dtype: {train_X2.dtype}")
+    print(f"Train labels shape after SMOTE: {train_labels.shape}, dtype: {train_labels.dtype}")
+
+    model = create_siamese_network(input_shape=(155, 220, 3))
+    model.compile(optimizer=RMSprop(learning_rate=0.001), loss=triplet_loss)
 
     start_time = time.perf_counter()
     model.fit(
@@ -113,9 +141,32 @@ for dataset_name, dataset_config in datasets.items():
         epochs=5, 
         batch_size=4, 
         verbose=1
-        )
+    )
 
     log_metrics(start_time, f"Training {dataset_name} Completed")
 
     model.save(f"{dataset_name}_siamese_model.h5")
     print(f"✅ Model saved as {dataset_name}_siamese_model.h5")
+
+    # Inference Time per Signature Pair
+    start_time = time.perf_counter()
+    model.predict([train_X1[:1], train_X2[:1]])
+    inference_time = time.perf_counter() - start_time
+    print(f"Inference Time per Signature Pair: {inference_time:.4f}s")
+
+    # Total Number of Pairwise Comparisons
+    num_pairs = len(train_X1) * len(train_X2)
+    print(f"Total Number of Pairwise Comparisons: {num_pairs}")
+
+    # FAISS Query Time
+    embeddings = model.predict([train_X1, train_X2])
+    faiss_index = build_faiss_index(embeddings)
+    start_time = time.perf_counter()
+    distances, indices = search_faiss(faiss_index, embeddings[:1])
+    faiss_query_time = time.perf_counter() - start_time
+    print(f"FAISS Query Time: {faiss_query_time:.4f}s")
+
+    # Memory Usage
+    memory_usage = (torch.cuda.memory_allocated() / (1024 * 1024)
+                    if torch.cuda.is_available() else 0)  # GPU memory
+    print(f"Memory Usage: {memory_usage:.2f} MB")
